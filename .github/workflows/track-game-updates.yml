@@ -1,0 +1,45 @@
+name: Track Game Updates
+
+on:
+  schedule:
+    # Runs once per day at 10:00 UTC.
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: track-game-updates
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tracker
+        env:
+          STEAM_GAMES: ${{ vars.STEAM_GAMES }}
+          STATE_FILE: .game_changelog_state.json
+          NEWS_COUNT: ${{ vars.NEWS_COUNT || '10' }}
+          ALERT_ON_FIRST_RUN: ${{ vars.ALERT_ON_FIRST_RUN || 'false' }}
+          REQUEST_TIMEOUT_SECONDS: ${{ vars.REQUEST_TIMEOUT_SECONDS || '20' }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python track_game_updates.py
+
+      - name: Commit state changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .game_changelog_state.json
+          git diff --cached --quiet || git commit -m "Update game changelog state"
+          git push
