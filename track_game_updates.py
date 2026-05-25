@@ -53,6 +53,7 @@ class Config:
     request_timeout_seconds: float
     discord_webhook_url: str | None
     alert_on_first_run: bool
+    include_external_news: bool
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,7 @@ def load_config(env_path: Path) -> Config:
         request_timeout_seconds=float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "20")),
         discord_webhook_url=os.environ.get("DISCORD_WEBHOOK_URL") or None,
         alert_on_first_run=parse_bool(os.environ.get("ALERT_ON_FIRST_RUN"), default=False),
+        include_external_news=parse_bool(os.environ.get("INCLUDE_EXTERNAL_NEWS"), default=False),
     )
 
 
@@ -174,11 +176,109 @@ def fetch_news(game: GameTarget, count: int, timeout_seconds: float) -> list[New
     return [item for item in news_items if isinstance(item, dict)]  # type: ignore[list-item]
 
 
+def is_trackable_news(item: NewsItem, include_external_news: bool) -> bool:
+    if include_external_news:
+        return True
+    url = item.get("url", "").lower()
+    feed_name = str(item.get("feedname", "")).lower()
+    feed_label = str(item.get("feedlabel", "")).lower()
+    if "/news/externalpost/" in url:
+        return False
+    if feed_name and feed_name not in {"steam_community_announcements", "steam_community_events"}:
+        return False
+    if "external" in feed_label:
+        return False
+    return True
+
+
+def safe_embed_url(value: str) -> str | None:
+    if not value:
+        return None
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    path = urllib.parse.quote(parsed.path, safe="/%:@")
+    query = urllib.parse.quote(parsed.query, safe="=&%:@/?+,;")
+    fragment = urllib.parse.quote(parsed.fragment, safe="=&%:@/?+,;")
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, query, fragment))
+
+
 def strip_markup(value: str, limit: int = 280) -> str:
+    value = re.sub(r"\[/?p\]", " ", value, flags=re.IGNORECASE)
     without_tags = re.sub(r"<[^>]+>", " ", value)
     without_bbcode = re.sub(r"\[[^\]]+\]", " ", without_tags)
     collapsed = re.sub(r"\s+", " ", html.unescape(without_bbcode)).strip()
     return collapsed[: limit - 1] + "..." if len(collapsed) > limit else collapsed
+
+
+def content_lines(value: str) -> list[str]:
+    text = html.unescape(value)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p>|</li>|</h[1-6]>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[p\]", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[/p\]", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\[(?:/)?(?:b|i|u|h1|list|\*)\]", " ", text, flags=re.IGNORECASE)
+    return [re.sub(r"\s+", " ", line).strip(" -•\t:") for line in text.splitlines() if line.strip()]
+
+
+def extract_version_reference(value: str) -> str | None:
+    lines = content_lines(value)
+    version_index: int | None = None
+
+    for index, line in enumerate(lines):
+        if re.search(r"\b(version|build)\s*(number)?\b", line, flags=re.IGNORECASE):
+            same_line_value = re.sub(
+                r"^.*?\b(?:version|build)\s*(?:number)?\s*:?\s*",
+                "",
+                line,
+                flags=re.IGNORECASE,
+            ).strip()
+            if same_line_value:
+                return same_line_value[:120]
+            version_index = index
+            break
+
+    if version_index is not None:
+        for line in lines[version_index + 1 : version_index + 4]:
+            if re.search(r"\d", line):
+                return line[:120]
+
+    for line in lines[:10]:
+        match = re.search(r"\b(?:steam|version|build)\s*:?\s*[A-Za-z0-9._-]*\d[A-Za-z0-9._-]*", line, flags=re.IGNORECASE)
+        if match:
+            return match.group(0)[:120]
+
+    return None
+
+
+def extract_download_size(value: str) -> str | None:
+    for line in content_lines(value):
+        match = re.search(r"\bdownload\s+size\s*:?\s*(.+)$", line, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()[:80]
+    return None
+
+
+def compact_summary(value: str, limit: int = 220) -> str:
+    skipped_patterns = (
+        r"^version\s*(number)?\s*:?$",
+        r"^steam\s*:\s*[A-Za-z0-9._-]+$",
+        r"^download\s+size\s*:.+$",
+    )
+    summary_lines: list[str] = []
+
+    for line in content_lines(value):
+        if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in skipped_patterns):
+            continue
+        if len(line) < 4:
+            continue
+        summary_lines.append(line)
+        if len(summary_lines) == 2:
+            break
+
+    summary = " | ".join(summary_lines) if summary_lines else strip_markup(value, limit=limit)
+    return summary[: limit - 1] + "..." if len(summary) > limit else summary
 
 
 def format_timestamp(timestamp: int | None) -> str:
@@ -234,14 +334,33 @@ def post_discord_alert(webhook_url: str, alert: Alert, timeout_seconds: float) -
     title = alert.item.get("title", "Untitled update")
     url = alert.item.get("url", "")
     date = format_timestamp(alert.item.get("date"))
-    summary = strip_markup(alert.item.get("contents", ""), limit=900)
-    content = f"**{alert.game.name} update:** {title}\n{date}"
-    if url:
-        content += f"\n{url}"
-    if summary:
-        content += f"\n\n{summary}"
+    contents = alert.item.get("contents", "")
+    summary = compact_summary(contents)
+    version_reference = extract_version_reference(contents) or "Not found"
+    download_size = extract_download_size(contents)
+    fields: list[dict[str, Any]] = [
+        {"name": "Version", "value": version_reference[:1024], "inline": True},
+    ]
+    if download_size:
+        fields.append({"name": "Download", "value": download_size[:1024], "inline": True})
+    fields.extend(
+        [
+            {"name": "Date", "value": date, "inline": True},
+            {"name": "App ID", "value": alert.game.app_id, "inline": True},
+        ]
+    )
+    embed: dict[str, Any] = {
+        "title": f"{alert.game.name}: {title}"[:256],
+        "description": summary[:4096] if summary else "New Steam update detected.",
+        "color": 0x66C0F4,
+        "fields": fields,
+        "footer": {"text": "Steam official news API"},
+    }
+    safe_url = safe_embed_url(url)
+    if safe_url:
+        embed["url"] = safe_url
 
-    payload = json.dumps({"content": content[:1900]}).encode("utf-8")
+    payload = json.dumps({"embeds": [embed]}).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
         data=payload,
@@ -257,7 +376,11 @@ def check_once(config: Config) -> int:
     alerts: list[Alert] = []
 
     for game in config.games:
-        items = fetch_news(game, config.news_count, config.request_timeout_seconds)
+        items = [
+            item
+            for item in fetch_news(game, config.news_count, config.request_timeout_seconds)
+            if is_trackable_news(item, config.include_external_news)
+        ]
         previous = state["games"].get(game.app_id)
         for item in find_new_items(items, previous, config.alert_on_first_run):
             alerts.append(Alert(game=game, item=item))

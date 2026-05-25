@@ -16,6 +16,7 @@ concurrency:
 jobs:
   track:
     runs-on: ubuntu-latest
+    environment: main
 
     steps:
       - name: Checkout repository
@@ -32,6 +33,7 @@ jobs:
           STATE_FILE: .game_changelog_state.json
           NEWS_COUNT: ${{ vars.NEWS_COUNT || '10' }}
           ALERT_ON_FIRST_RUN: ${{ vars.ALERT_ON_FIRST_RUN || 'false' }}
+          INCLUDE_EXTERNAL_NEWS: ${{ vars.INCLUDE_EXTERNAL_NEWS || 'false' }}
           REQUEST_TIMEOUT_SECONDS: ${{ vars.REQUEST_TIMEOUT_SECONDS || '20' }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python track_game_updates.py

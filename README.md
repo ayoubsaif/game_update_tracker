@@ -30,14 +30,17 @@ For production use, prefer running it as a scheduled task or cron job without `-
 
 This repository includes `.github/workflows/track-game-updates.yml`, which runs once per day at `10:00 UTC` and can also be started manually from the GitHub Actions tab.
 
-Add these GitHub repository variables:
+The workflow is attached to the GitHub Actions environment named `main`. If you use a different environment name, update `environment: main` in the workflow.
+
+Add these GitHub environment variables under `Settings -> Environments -> main`:
 
 - `STEAM_GAMES`: example `2483190:Example Game`
 - `NEWS_COUNT`: optional, defaults to `10`
 - `ALERT_ON_FIRST_RUN`: optional, defaults to `false`
+- `INCLUDE_EXTERNAL_NEWS`: optional, defaults to `false`
 - `REQUEST_TIMEOUT_SECONDS`: optional, defaults to `20`
 
-Add this GitHub repository secret if you want Discord alerts:
+Add this GitHub environment secret under `Settings -> Environments -> main` if you want Discord alerts:
 
 - `DISCORD_WEBHOOK_URL`
 
@@ -45,7 +48,11 @@ The workflow commits `.game_changelog_state.json` back to the repository after e
 
 ## Alerts
 
-Alerts are printed to stdout. To also send Discord alerts, set `DISCORD_WEBHOOK_URL` in `.env`.
+Alerts are printed to stdout. To also send compact Discord embed alerts, set `DISCORD_WEBHOOK_URL` in `.env`.
+
+Discord alerts include the update title, a short changelog summary, date, app ID, and a detected version/build reference when Steam includes one, for example `Steam: 360.259`.
+
+External media posts are ignored by default, so items like Rock Paper Shotgun articles do not trigger alerts. Set `INCLUDE_EXTERNAL_NEWS=true` only if you want every Steam news feed item.
 
 ## Configuration
 
